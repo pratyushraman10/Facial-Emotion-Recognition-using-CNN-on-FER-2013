@@ -1,0 +1,63 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from sklearn.model_selection import train_test_split
+
+# Load the FER-2013 dataset
+df = pd.read_csv("fer2013.csv")
+
+# Filter rows where pixel length matches 48*48
+df_clean = df[df['pixels'].str.split().str.len() == 48*48]
+
+# Prepare features from df_clean
+X = np.vstack(df_clean['pixels'].apply(lambda x: np.fromstring(x, sep=' ')).to_numpy())
+X = X.reshape(-1, 48, 48, 1) / 255.0
+
+# Prepare labels from the same df_clean
+# Using get_dummies without columns argument, then reindex for all emotion classes 0 to 6
+y = pd.get_dummies(df_clean['emotion']).reindex(columns=range(7), fill_value=0).values
+
+# Split data into train and test sets with stratification
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=df_clean['emotion']
+)
+
+# Split part of training data as validation set
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train, y_train, test_size=0.1, random_state=42, stratify=np.argmax(y_train, axis=1)
+)
+
+# Build CNN model
+model = models.Sequential([
+    layers.Conv2D(32, (3,3), activation='relu', input_shape=(48,48,1)),
+    layers.Conv2D(32, (3,3), activation='relu'),
+    layers.MaxPooling2D((2,2)),
+    layers.Conv2D(64, (3,3), activation='relu'),
+    layers.Conv2D(64, (3,3), activation='relu'),
+    layers.MaxPooling2D((2,2)),
+    layers.Conv2D(128, (3,3), activation='relu'),
+    layers.MaxPooling2D((2,2)),
+    layers.Flatten(),
+    layers.Dense(128, activation='relu'),
+    layers.Dense(64, activation='relu'),
+    layers.Dense(7, activation='softmax')
+])
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+model.summary()  # See architecture
+
+# Train the model
+model.fit(
+    X_train, y_train,
+    epochs=20,
+    batch_size=64,
+    validation_data=(X_val, y_val)
+)
+
+# Evaluate on test set
+test_loss, test_acc = model.evaluate(X_test, y_test)
+print("Test accuracy:", test_acc)
