@@ -2,62 +2,117 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import layers, models
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.model_selection import train_test_split
 
-# Load the FER-2013 dataset
+# I’m loading the FER-2013 dataset, which is a CSV where each image is stored as pixel strings.
 df = pd.read_csv("fer2013.csv")
 
-# Filter rows where pixel length matches 48*48
+# I only want to keep images that have exactly 48x48 pixels, to maintain consistency.
 df_clean = df[df['pixels'].str.split().str.len() == 48*48]
 
-# Prepare features from df_clean
+# I’m converting those pixel strings into numpy arrays, reshaping them into 48x48 grayscale images, and normalizing the pixel values to be between 0 and 1.
 X = np.vstack(df_clean['pixels'].apply(lambda x: np.fromstring(x, sep=' ')).to_numpy())
 X = X.reshape(-1, 48, 48, 1) / 255.0
 
-# Prepare labels from the same df_clean
-# Using get_dummies without columns argument, then reindex for all emotion classes 0 to 6
+# Here, I convert the emotion labels into one-hot encoded vectors so the model can learn them properly.
 y = pd.get_dummies(df_clean['emotion']).reindex(columns=range(7), fill_value=0).values
 
-# Split data into train and test sets with stratification
+# I’m splitting my data into training+validation (80%) and testing (20%), making sure the emotions are balanced.
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=df_clean['emotion']
 )
 
-# Split part of training data as validation set
+# Now, from the training data, I separate out 10% to use for validation, also keeping labels balanced.
 X_train, X_val, y_train, y_val = train_test_split(
     X_train, y_train, test_size=0.1, random_state=42, stratify=np.argmax(y_train, axis=1)
 )
 
-# Build CNN model
+# To help my model generalize better, I set up data augmentation, where I randomly rotate, shift, and flip the images during training.
+datagen = ImageDataGenerator(
+    rotation_range=10,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    horizontal_flip=True
+)
+datagen.fit(X_train)
+
+# Here, I’m building my CNN model.
+# I add Conv2D layers to learn features, BatchNormalization to keep training stable, MaxPooling to reduce dimensions, and Dropout to prevent overfitting.
 model = models.Sequential([
     layers.Conv2D(32, (3,3), activation='relu', input_shape=(48,48,1)),
+    layers.BatchNormalization(),
     layers.Conv2D(32, (3,3), activation='relu'),
+    layers.BatchNormalization(),
     layers.MaxPooling2D((2,2)),
+    layers.Dropout(0.25),
+
     layers.Conv2D(64, (3,3), activation='relu'),
+    layers.BatchNormalization(),
     layers.Conv2D(64, (3,3), activation='relu'),
+    layers.BatchNormalization(),
     layers.MaxPooling2D((2,2)),
+    layers.Dropout(0.25),
+
     layers.Conv2D(128, (3,3), activation='relu'),
+    layers.BatchNormalization(),
     layers.MaxPooling2D((2,2)),
-    layers.Flatten(),
+    layers.Dropout(0.25),
+
+    layers.Flatten(),  # I flatten the feature maps so I can use Dense layers on top.
     layers.Dense(128, activation='relu'),
+    layers.Dropout(0.5),
     layers.Dense(64, activation='relu'),
-    layers.Dense(7, activation='softmax')
+    layers.Dropout(0.5),
+    layers.Dense(7, activation='softmax')  # I output probabilities for each of the 7 emotion classes.
 ])
+
+# Now I compile the model using the Adam optimizer.
+# I choose categorical crossentropy since this is a multi-class problem, and I’ll track accuracy, precision, and recall during training.
 model.compile(
     optimizer='adam',
     loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-model.summary()  # See architecture
-
-# Train the model
-model.fit(
-    X_train, y_train,
-    epochs=20,
-    batch_size=64,
-    validation_data=(X_val, y_val)
+    metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
 )
 
-# Evaluate on test set
-test_loss, test_acc = model.evaluate(X_test, y_test)
+# I print the model summary to see the layers and parameters.
+model.summary()  
+
+# I set up callbacks to make my training smarter:
+# - EarlyStopping will stop training if the validation loss doesn’t improve for 7 epochs.
+# - ReduceLROnPlateau will lower the learning rate if the validation loss stops improving, helping the model converge better.
+early_stop = EarlyStopping(monitor='val_loss', patience=7, restore_best_weights=True)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=3)
+
+# I start training using the augmented data generator, validating on my validation set, and using the callbacks to avoid overfitting and adjust learning rate.
+history = model.fit(
+    datagen.flow(X_train, y_train, batch_size=64),
+    validation_data=(X_val, y_val),
+    epochs=50,
+    steps_per_epoch=len(X_train) // 64,
+    callbacks=[early_stop, reduce_lr]
+)
+
+# Once training is done, I evaluate my model on the test data to see how well it performs.
+test_loss, test_acc, test_prec, test_recall = model.evaluate(X_test, y_test)
 print("Test accuracy:", test_acc)
+print("Test precision:", test_prec)
+print("Test recall:", test_recall)
+
+# To better understand the results, I predict the classes on the test set, then generate a confusion matrix and classification report to see detailed performance.
+y_pred = model.predict(X_test)
+y_pred_classes = np.argmax(y_pred, axis=1)
+y_true = np.argmax(y_test, axis=1)
+
+from sklearn.metrics import classification_report, confusion_matrix
+
+# I print out the confusion matrix to see which emotions my model confuses most.
+cm = confusion_matrix(y_true, y_pred_classes)
+print("Confusion Matrix:\n", cm)
+
+# I also print a classification report showing precision, recall, and f1-score for each emotion.
+report = classification_report(y_true, y_pred_classes, target_names=[
+    "Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"
+])
+print("Classification Report:\n", report)
